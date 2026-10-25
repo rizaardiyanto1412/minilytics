@@ -30,9 +30,35 @@ function safeEqual(a: string, b: string): boolean {
   return r === 0;
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  let r = 0;
+  for (let i = 0; i < a.byteLength; i++) r |= a[i] ^ b[i];
+  return r === 0;
+}
+
 /**
- * Verify a Standard Webhooks signature (used by Dodo Payments).
- * Signed content is `${id}.${timestamp}.${body}`, HMAC-SHA256 with the base64 secret after `whsec_`.
+ * HMAC keys for Standard Webhooks-style signatures.
+ * Dodo (and Polar secrets generated on/after 8 Sep 2026) sign with the
+ * base64-decoded bytes after `whsec_`. Older Polar secrets sign with the
+ * UTF-8 bytes of the full secret string. Polar's SDK tries both; so do we.
+ */
+function webhookHmacKeys(secret: string): Uint8Array<ArrayBuffer>[] {
+  const utf8 = enc.encode(secret) as Uint8Array<ArrayBuffer>;
+  const keys: Uint8Array<ArrayBuffer>[] = [utf8];
+  const remainder = secret.startsWith('whsec_') ? secret.slice(6) : secret;
+  try {
+    const decoded = b64ToBytes(remainder);
+    if (decoded.byteLength > 0 && !bytesEqual(decoded, utf8)) keys.push(decoded);
+  } catch {
+    // Remainder wasn't valid base64; the UTF-8 key is the only candidate.
+  }
+  return keys;
+}
+
+/**
+ * Verify a Standard Webhooks signature (Dodo Payments and Polar).
+ * Signed content is `${id}.${timestamp}.${body}`, HMAC-SHA256.
  */
 export async function verifyStandardWebhook(
   secret: string,
@@ -44,17 +70,14 @@ export async function verifyStandardWebhook(
   if (!id || !timestamp || !signature) return false;
   const ts = Number(timestamp);
   if (!Number.isFinite(ts) || Math.abs(now / 1000 - ts) > 5 * 60) return false;
-  let key: Uint8Array<ArrayBuffer>;
-  try {
-    key = b64ToBytes(secret.startsWith('whsec_') ? secret.slice(6) : secret);
-  } catch {
-    return false;
-  }
-  const expected = bytesToB64(await hmac(key, `${id}.${timestamp}.${body}`));
+  const keys = webhookHmacKeys(secret);
+  if (!keys.length) return false;
+  const signed = `${id}.${timestamp}.${body}`;
+  const expected = await Promise.all(keys.map(async (key) => bytesToB64(await hmac(key, signed))));
   return signature
     .split(' ')
     .map((s) => s.split(',')[1] ?? '')
-    .some((sig) => safeEqual(sig, expected));
+    .some((sig) => expected.some((exp) => safeEqual(sig, exp)));
 }
 
 /** Sign a value for the dashboard login cookie. */

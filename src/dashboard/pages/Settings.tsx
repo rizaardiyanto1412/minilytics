@@ -43,7 +43,14 @@ export function Settings({ siteId }: { siteId: string }) {
   useEffect(() => {
     api<Site>(`/api/sites/${siteId}`).then((s) => {
       setSite(s);
-      setForm({ name: s.name, domain: s.domain, timezone: s.timezone, currency: s.currency, dodo_webhook_secret: s.dodo_webhook_secret ?? '' });
+      setForm({
+        name: s.name,
+        domain: s.domain,
+        timezone: s.timezone,
+        currency: s.currency,
+        dodo_webhook_secret: s.dodo_webhook_secret ?? '',
+        polar_webhook_secret: s.polar_webhook_secret ?? '',
+      });
     });
   }, [siteId]);
 
@@ -61,7 +68,8 @@ export function Settings({ siteId }: { siteId: string }) {
 
   if (!site) return null;
   const snippet = `<script\n  defer\n  data-website-id="${site.id}"\n  src="${origin}/js/script.js"\n></script>`;
-  const webhookUrl = `${origin}/api/webhooks/dodo/${site.id}`;
+  const dodoWebhookUrl = `${origin}/api/webhooks/dodo/${site.id}`;
+  const polarWebhookUrl = `${origin}/api/webhooks/polar/${site.id}`;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5 px-4 py-8 sm:py-12">
@@ -138,7 +146,7 @@ async rewrites() {
             In Dodo Payments → <b>Developer → Webhooks</b>, add this endpoint and subscribe to <code>payment.succeeded</code> and{' '}
             <code>refund.succeeded</code>:
             <div className="mt-2">
-              <Code>{webhookUrl}</Code>
+              <Code>{dodoWebhookUrl}</Code>
             </div>
           </li>
           <li>
@@ -189,6 +197,76 @@ const session = await dodo.checkoutSessions.create({
             <b>Recommended:</b> set your product's <b>return / redirect URL</b> in Dodo to a page on your site, e.g.{' '}
             <code>https://{site.domain}/thanks</code>. Dodo adds <code>?payment_id=…</code> to it, which lets Minilytics link the payment to
             the exact visitor even when metadata doesn't come through (for example with payment links).
+          </li>
+        </ol>
+      </Section>
+
+      <Section
+        title="4. Connect Polar (revenue attribution)"
+        desc="Same as Dodo: payments are linked to the visitor who paid and credited to the source that brought them."
+      >
+        <ol className="list-decimal space-y-4 pl-5 text-sm">
+          <li>
+            In Polar → <b>Settings → Webhooks</b>, add this endpoint (delivery format: Raw) and subscribe to{' '}
+            <code>order.paid</code>, <code>refund.created</code> and <code>refund.updated</code>:
+            <div className="mt-2">
+              <Code>{polarWebhookUrl}</Code>
+            </div>
+          </li>
+          <li>
+            Paste the webhook's <b>signing secret</b> (Polar shows it when you create the endpoint; often starts with <code>whsec_</code>):
+            <div className="mt-2 flex gap-2">
+              <input
+                className="input font-mono"
+                type="password"
+                placeholder="whsec_..."
+                value={form.polar_webhook_secret ?? ''}
+                onChange={(e) => setForm({ ...form, polar_webhook_secret: e.target.value })}
+              />
+              <button className="btn-dark" onClick={() => save({ polar_webhook_secret: form.polar_webhook_secret ?? '' }, 'Webhook secret saved')}>
+                Save
+              </button>
+            </div>
+            {site.polar_webhook_secret && <p className="mt-1 text-xs text-emerald-600">✓ Secret configured</p>}
+          </li>
+          <li>
+            Pass the visitor cookies as metadata (and customer metadata) when you create a checkout:
+            <div className="mt-2">
+              <Code>{`import { Polar } from '@polar-sh/sdk';
+import { cookies } from 'next/headers';
+
+const polar = new Polar({ accessToken: process.env.POLAR_ACCESS_TOKEN });
+const jar = await cookies();
+
+const checkout = await polar.checkouts.create({
+  products: ['<PRODUCT_ID>'],
+  success_url: 'https://${site.domain}/checkout/complete?checkout_id={CHECKOUT_ID}',
+  metadata: {
+    ml_visitor_id: jar.get('ml_vid')?.value ?? '',
+    ml_session_id: jar.get('ml_sid')?.value ?? '',
+  },
+  customer_metadata: {
+    ml_visitor_id: jar.get('ml_vid')?.value ?? '',
+    ml_session_id: jar.get('ml_sid')?.value ?? '',
+  },
+});`}</Code>
+            </div>
+            <p className="mt-2 text-stone-500">
+              Using Polar <b>checkout links</b> (buy.polar.sh/polar_cl_…) instead? Polar does not accept arbitrary metadata query params.
+              The script sets <code>reference_id</code> to the visitor id (Polar's documented custom-id param) when the link is clicked, as
+              long as the link doesn't already have one. That still can miss; set the success URL (step 4) as well. In the browser you can
+              also read the ids with <code>window.minilytics.attribution()</code>.
+            </p>
+            <p className="mt-2 text-stone-500">
+              If metadata is missing, Minilytics still links the payment when the buyer lands back on your site with{' '}
+              <code>?checkout_id=</code>, when their email matches a visitor you <code>identify()</code>, when it's a renewal of an earlier
+              payment, or when exactly one visitor clicked a checkout link shortly before paying.
+            </p>
+          </li>
+          <li>
+            <b>Recommended:</b> set the checkout's <b>success URL</b> to a page on your site that loads the script, e.g.{' '}
+            <code>https://{site.domain}/checkout/complete?checkout_id={'{CHECKOUT_ID}'}</code>. Polar substitutes the checkout session id,
+            which lets Minilytics link the payment to the exact visitor even when metadata doesn't come through.
           </li>
         </ol>
       </Section>
@@ -278,7 +356,7 @@ function AiSetup({ site, origin }: { site: Site; origin: string }) {
           <h2 className="text-lg font-semibold">✨ Set up with AI</h2>
           <p className="mt-1 max-w-lg text-sm text-stone-600">
             Copy this prompt into Claude Code, Cursor or any coding AI opened in your project. It installs the script, connects Dodo Payments
-            attribution, identifies users and adds button goals, using this site's real values. It asks you only what it can't find in your code.
+            and Polar attribution, identifies users and adds button goals, using this site's real values. It asks you only what it can't find in your code.
           </p>
         </div>
         <button
@@ -297,7 +375,8 @@ function AiSetup({ site, origin }: { site: Site; origin: string }) {
       </button>
       {open && <pre className="code mt-3 max-h-96 whitespace-pre-wrap">{prompt}</pre>}
       <p className="mt-3 text-xs text-stone-500">
-        The AI handles the code. You still connect the Dodo webhook yourself (step 3 below), because that's done in Dodo's dashboard.
+        The AI handles the code. You still connect the Dodo and/or Polar webhook yourself (steps 3–4 below), because that's done in each
+        provider's dashboard.
       </p>
     </section>
   );

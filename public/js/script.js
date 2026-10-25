@@ -130,7 +130,7 @@
     w.addEventListener('popstate', pageview);
   }
 
-  // ---- goals, outbound links, Dodo Payments checkout links
+  // ---- goals, outbound links, Dodo / Polar checkout links
   function goal(name, props) {
     if (!name) return;
     send('goal', { n: String(name).slice(0, 64), p: props || undefined }, true);
@@ -139,39 +139,50 @@
     var id = ids();
     return { ml_visitor_id: id.vid, ml_session_id: id.sid };
   }
-  // Dodo checkout links carry the visitor as metadata. They're tagged as soon as they appear on the page,
+  function isPolarCheckout(u) {
+    if (!/(^|\.)polar\.sh$/.test(u.hostname)) return false;
+    // Permanent checkout links and session URLs live on buy.polar.sh (polar_cl_ / polar_c_).
+    if (/(^|\.)buy\.polar\.sh$/.test(u.hostname)) return true;
+    return /polar_cl_|polar_c_/.test(u.pathname);
+  }
+  // Checkout links carry the visitor as metadata. They're tagged as soon as they appear on the page,
   // not just on click, because other scripts (e.g. Umami's click tracking) may copy the href and navigate
   // before our click handler runs.
-  function tagDodoLink(a) {
+  // Dodo: ?metadata_ml_visitor_id= (Dodo's payment-link syntax).
+  // Polar: checkout links only persist reference_id / UTM query params as metadata (not arbitrary keys).
+  function tagCheckoutLink(a) {
     try {
       var u = new URL(a.href);
-      if (!/(^|\.)dodopayments\.com$/.test(u.hostname)) return;
       var att = attribution();
-      u.searchParams.set('metadata_ml_visitor_id', att.ml_visitor_id);
-      u.searchParams.set('metadata_ml_session_id', att.ml_session_id);
+      if (/(^|\.)dodopayments\.com$/.test(u.hostname)) {
+        u.searchParams.set('metadata_ml_visitor_id', att.ml_visitor_id);
+        u.searchParams.set('metadata_ml_session_id', att.ml_session_id);
+      } else if (isPolarCheckout(u)) {
+        if (!u.searchParams.get('reference_id')) u.searchParams.set('reference_id', att.ml_visitor_id);
+      } else return;
       var next = u.toString();
       if (a.href !== next) a.href = next;
     } catch (e) {}
   }
-  function tagDodoLinks() {
-    var links = d.querySelectorAll('a[href*="dodopayments.com"]');
-    for (var i = 0; i < links.length; i++) tagDodoLink(links[i]);
+  function tagCheckoutLinks() {
+    var links = d.querySelectorAll('a[href*="dodopayments.com"], a[href*="polar.sh"]');
+    for (var i = 0; i < links.length; i++) tagCheckoutLink(links[i]);
   }
   var tagQueued = false;
   function queueTag() {
     if (tagQueued) return;
     tagQueued = true;
-    setTimeout(function () { tagQueued = false; tagDodoLinks(); }, 50);
+    setTimeout(function () { tagQueued = false; tagCheckoutLinks(); }, 50);
   }
   if (w.MutationObserver) {
     new MutationObserver(queueTag).observe(d.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href'] });
   }
-  if (d.readyState === 'loading') d.addEventListener('DOMContentLoaded', tagDodoLinks);
-  else tagDodoLinks();
+  if (d.readyState === 'loading') d.addEventListener('DOMContentLoaded', tagCheckoutLinks);
+  else tagCheckoutLinks();
   // Refresh right before a click starts, in case the session id rotated while the page sat idle.
   function onPress(e) {
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (a) tagDodoLink(a);
+    if (a) tagCheckoutLink(a);
   }
   d.addEventListener('pointerdown', onPress, true);
   d.addEventListener('keydown', function (e) { if (e.key === 'Enter') onPress(e); }, true);
@@ -189,7 +200,7 @@
     }
     var a = el.closest('a[href]');
     if (a) {
-      tagDodoLink(a);
+      tagCheckoutLink(a);
       try {
         var u = new URL(a.href, loc.href);
         if (/^https?:$/.test(u.protocol) && u.hostname !== loc.hostname && !(domain && u.hostname.slice(-domain.length) === domain)) {

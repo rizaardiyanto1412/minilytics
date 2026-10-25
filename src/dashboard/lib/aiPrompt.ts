@@ -23,8 +23,10 @@ export function buildAiPrompt(site: Site, origin: string): string {
 - Keep the exact attributes. Load it once only. Single-page-app navigation is tracked automatically; do not add manual pageview calls.
 - If the project has a Content-Security-Policy, allow ${origin} in script-src and connect-src.
 
-## Task 2 — Revenue attribution with Dodo Payments (most important)
-The script stores two first-party cookies: \`ml_vid\` (visitor id) and \`ml_sid\` (session id). Every Dodo payment must carry them as metadata so Minilytics knows which visitor (and therefore which tweet / article / Google page) made the money.
+## Task 2 — Revenue attribution with Dodo Payments and/or Polar
+The script stores two first-party cookies: \`ml_vid\` (visitor id) and \`ml_sid\` (session id). Every payment must carry them as metadata so Minilytics knows which visitor (and therefore which tweet / article / Google page) made the money. Do this for whichever provider this codebase uses (it may use both).
+
+### Dodo Payments
 - Search the codebase for Dodo usage: "dodopayments", "DodoPayments", "checkoutSessions.create", "payments.create", "subscriptions.create", "checkout.dodopayments.com", "/buy/".
 - Where a checkout/payment/subscription is created on the SERVER, read the cookies from the incoming request and MERGE them into the existing metadata (never drop existing metadata keys):
     metadata: { ...existingMetadata, ml_visitor_id: <cookie ml_vid> ?? '', ml_session_id: <cookie ml_sid> ?? '' }
@@ -33,6 +35,16 @@ The script stores two first-party cookies: \`ml_vid\` (visitor id) and \`ml_sid\
 - Static Dodo payment links (<a href="https://checkout.dodopayments.com/buy/...">) need no change — the script adds metadata to them automatically on click. But if code redirects to a payment link with JavaScript (window.location = ...), append the params yourself: ?metadata_ml_visitor_id=<id>&metadata_ml_session_id=<id> using window.minilytics.attribution().
 - Make sure every checkout has a return/redirect URL on this site (e.g. return_url: 'https://${site.domain}/thanks' for checkout sessions, or ?redirect_url=... on payment links), and that page loads the Minilytics script. Dodo appends ?payment_id=... (or ?subscription_id=...) to it, and Minilytics uses that to link the payment to the visitor even if metadata is lost. Keep those query params on the URL (don't strip them before the page loads).
 - Do NOT touch Dodo webhooks in this codebase for Minilytics. I connect Dodo → Minilytics myself in the Dodo dashboard (webhook URL: ${origin}/api/webhooks/dodo/${site.id}).
+
+### Polar (polar.sh)
+- Search the codebase for Polar usage: "@polar-sh/sdk", "polar-sh", "Polar", "checkouts.create", "checkout_id", "buy.polar.sh", "polar_cl_", "polar_c_", "customer_metadata", "success_url" / "successUrl".
+- Where a Polar checkout is created on the SERVER, read the cookies from the incoming request and MERGE them into BOTH metadata and customer_metadata (never drop existing keys). Polar copies checkout metadata onto the order and customer_metadata onto the customer:
+    metadata: { ...existingMetadata, ml_visitor_id: <cookie ml_vid> ?? '', ml_session_id: <cookie ml_sid> ?? '' }
+    customer_metadata: { ...existingCustomerMetadata, ml_visitor_id: <cookie ml_vid> ?? '', ml_session_id: <cookie ml_sid> ?? '' }
+- If the checkout request is made from the BROWSER to the server, cookies usually go along. If the API is on a different domain, read window.minilytics.attribution() and send those ids, then put them in metadata / customer_metadata on the server.
+- Static Polar checkout links (<a href="https://buy.polar.sh/polar_cl_...">) need no change — the script sets reference_id to the visitor id automatically (Polar checkout links only persist reference_id and UTM query params as metadata, not arbitrary keys). If code redirects to a Polar checkout link with JavaScript, append ?reference_id=<ml_visitor_id> yourself using window.minilytics.attribution(), but do not overwrite an existing reference_id.
+- Make sure every Polar checkout has a success URL on this site that loads the Minilytics script, with Polar's checkout id placeholder, e.g. success_url: 'https://${site.domain}/checkout/complete?checkout_id={CHECKOUT_ID}'. Polar substitutes the real checkout session id. Keep checkout_id on the URL (don't strip it before the page loads) — Minilytics uses it to link the payment if metadata is missing.
+- Do NOT touch Polar webhooks in this codebase for Minilytics. I connect Polar → Minilytics myself in the Polar dashboard (webhook URL: ${origin}/api/webhooks/polar/${site.id}; events: order.paid, refund.created, refund.updated).
 
 ## Task 3 — Identify logged-in users
 Right after a successful login/signup (and on app load when a user session exists), call:
@@ -57,7 +69,7 @@ Always call it with optional chaining (window.minilytics?.(...)) so pages never 
 
 ## When you are done, reply with
 1. A list of every file you changed and why.
-2. Which checkout/payment code paths now send ml_visitor_id / ml_session_id (and any you could not find or were unsure about).
+2. Which checkout/payment code paths now send ml_visitor_id / ml_session_id (Dodo and/or Polar), and any you could not find or were unsure about.
 3. Which goals you added and where.
 4. How I can verify: open the site, in DevTools → Network a POST to ${origin}/api/event returns 202, and the visit appears in my Minilytics dashboard within seconds.`;
 }

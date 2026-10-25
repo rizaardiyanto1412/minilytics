@@ -100,3 +100,20 @@ describe('Standard Webhooks (Dodo)', () => {
     expect(await verifyStandardWebhook(secret, { id: 'msg_1', timestamp: String(Number(ts) - 3600), signature: `v1,${sig}` }, body)).toBe(false);
   });
 });
+
+describe('Polar webhook signatures', () => {
+  const body = '{"type":"order.paid"}';
+  const ts = String(Math.floor(Date.now() / 1000));
+  it('accepts Polar HMAC (UTF-8 bytes of the full secret, including whsec_)', async () => {
+    const secret = 'whsec_polar-hmac-not-b64';
+    const sig = createHmac('sha256', secret).update(`msg_p.${ts}.${body}`).digest('base64');
+    expect(await verifyStandardWebhook(secret, { id: 'msg_p', timestamp: ts, signature: `v1,${sig}` }, body)).toBe(true);
+    expect(await verifyStandardWebhook(secret, { id: 'msg_p', timestamp: ts, signature: `v1,${sig}` }, body + ' ')).toBe(false);
+  });
+  it('still accepts Standard Webhooks keys for newer Polar secrets', async () => {
+    const key = Buffer.from('polar-standard-key-bytes!!');
+    const secret = 'whsec_' + key.toString('base64');
+    const sig = createHmac('sha256', key).update(`msg_p2.${ts}.${body}`).digest('base64');
+    expect(await verifyStandardWebhook(secret, { id: 'msg_p2', timestamp: ts, signature: `v1,${sig}` }, body)).toBe(true);
+  });
+});
