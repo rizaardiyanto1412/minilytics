@@ -135,13 +135,39 @@ Using Dodo **payment links**? The script adds `metadata_ml_visitor_id` / `metada
    script. Dodo adds `?payment_id=…` to it, and Minilytics uses that to link the payment to the exact visitor even when
    metadata doesn't come through.
 
+## Revenue attribution with Polar
+
+1. In Polar → Settings → Webhooks, add `https://YOUR-HOST/api/webhooks/polar/SITE_ID` (delivery format: Raw) and
+   subscribe to `order.paid`, `refund.created` and `refund.updated`. Paste the signing secret into the site settings.
+2. Pass the visitor cookies as checkout metadata **and** customer metadata when creating a checkout:
+
+```ts
+const jar = await cookies(); // next/headers
+await polar.checkouts.create({
+  products: ['<PRODUCT_ID>'],
+  success_url: 'https://yoursite.com/checkout/complete?checkout_id={CHECKOUT_ID}',
+  metadata: { ml_visitor_id: jar.get('ml_vid')?.value ?? '', ml_session_id: jar.get('ml_sid')?.value ?? '' },
+  customer_metadata: { ml_visitor_id: jar.get('ml_vid')?.value ?? '', ml_session_id: jar.get('ml_sid')?.value ?? '' },
+});
+```
+
+Polar copies `metadata` onto the order (and subscription) and `customer_metadata` onto the customer. Using Polar
+**checkout links** (`buy.polar.sh/polar_cl_…`)? Polar does not accept arbitrary metadata query params — only
+`reference_id` and UTM tags are stored. The script sets `reference_id` to the visitor id when those links are clicked
+(unless the link already has one). That still can miss, so also do step 3.
+
+3. Recommended: set the checkout's success URL to a page on your site that loads the script, with Polar's placeholder,
+   e.g. `/checkout/complete?checkout_id={CHECKOUT_ID}`. Polar substitutes the checkout session id, and Minilytics uses
+   that to link the payment to the exact visitor even when metadata doesn't come through.
+
 **How credit is given:** a payment goes to the paying visitor's last visit that came from a real source (last non-direct
 touch). So "clicked a tweet, came back directly 17 days later and paid" is credited to the tweet. If metadata is
-missing, Minilytics tries, in order: the return page (`?payment_id=`), an earlier payment by the same customer
-(renewals), an email you `identify()`'d, and finally checkout timing (used only when exactly one visitor clicked a Dodo
-checkout link in the 3 hours before the payment). The Journey tab shows how each payment was matched, and **Try
-matching again** re-runs this for older payments.
-Refunds are subtracted from revenue.
+missing, Minilytics tries, in order: the return page (`?payment_id=` for Dodo, `?checkout_id=` for Polar), an earlier
+payment by the same customer (renewals), an email you `identify()`'d, and finally checkout timing (used only when
+exactly one visitor clicked a Dodo or Polar checkout link in the 3 hours before the payment). The Journey tab shows how
+each payment was matched, and **Try matching again** re-runs this for older payments.
+Refunds are subtracted from revenue. Polar subscription renewals arrive as another `order.paid` (with
+`billing_reason: subscription_cycle`) and are marked as returning customers.
 
 Other providers can use the generic API (the key is in site settings):
 
@@ -159,7 +185,7 @@ No analytics tool is 100% accurate. These are the main gaps and how this project
 - **Safari** keeps cookies set by JavaScript for at most 7 days. A Safari visitor who returns after more than a week counts as new. The
   email fallback above recovers most of these payments.
 - **Bots** are filtered by user agent and the `navigator.webdriver` flag.
-- Revenue in a different currency than the site's is converted only when Dodo gives a settlement amount in the site's currency.
+- Revenue in a different currency than the site's is converted only when Dodo gives a settlement amount in the site's currency. Polar amounts are stored in the order's currency.
 
 ## Local development
 
@@ -176,8 +202,8 @@ npm run smoke                         # end-to-end test against the running dev 
 
 ## How it's built
 
-- `public/js/script.js`: the tracker, 9 KB (about 3.5 KB gzipped). It handles cookies, pageviews, engaged time, goals, outbound links and Dodo link tagging
-- `src/worker`: a Hono app on Cloudflare Workers that handles event ingestion, the Dodo webhook, the payments and goals API, and stats queries on D1 (SQLite)
+- `public/js/script.js`: the tracker, 9 KB (about 3.5 KB gzipped). It handles cookies, pageviews, engaged time, goals, outbound links and Dodo / Polar checkout-link tagging
+- `src/worker`: a Hono app on Cloudflare Workers that handles event ingestion, the Dodo and Polar webhooks, the payments and goals API, and stats queries on D1 (SQLite)
 - `src/dashboard`: the React dashboard (Vite, Tailwind, Recharts), served as static files by the same Worker
 - `migrations/`: the database schema
 

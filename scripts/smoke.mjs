@@ -174,6 +174,137 @@ assert(!c5.visitor_id, 'ambiguous timing is not guessed');
 const rm = (await call(`/api/sites/${site.id}/rematch`, { method: 'POST' })).body;
 assert(rm.checked === 1 && rm.matched === 0 && /too close to call/.test(rm.details[0].reason), `rematch explains: "${rm.details?.[0]?.reason}"`);
 
+// --- Polar (own site, so Polar checkout clicks don't affect Dodo timing matches) ---
+for (const old of (await call('/api/sites')).body) if (old.domain === 'polar-smoke.com') await call(`/api/sites/${old.id}`, { method: 'DELETE' });
+const polarSite = (await call('/api/sites', { method: 'POST', body: JSON.stringify({ domain: 'polar-smoke.com', name: 'Polar Smoke' }) })).body;
+const polarSecretBytes = crypto.randomBytes(24);
+const polarSecret = 'whsec_' + polarSecretBytes.toString('base64');
+await call(`/api/sites/${polarSite.id}`, { method: 'PATCH', body: JSON.stringify({ polar_webhook_secret: polarSecret }) });
+async function polar(payload, sign = true) {
+  const body = JSON.stringify(payload);
+  const id = 'msg_' + crypto.randomUUID();
+  const ts = Math.floor(Date.now() / 1000).toString();
+  const sig = crypto.createHmac('sha256', polarSecretBytes).update(`${id}.${ts}.${body}`).digest('base64');
+  return fetch(`${BASE}/api/webhooks/polar/${polarSite.id}`, {
+    method: 'POST',
+    headers: { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': sign ? `v1,${sig}` : 'v1,bad' },
+    body,
+  });
+}
+const polarVid = crypto.randomUUID(), polarSid = crypto.randomUUID();
+await event(polarSite.id, { t: 'pageview', u: 'https://polar-smoke.com/?utm_campaign=polar-launch', r: 'https://t.co/xyz', vid: polarVid, sid: polarSid });
+const polarOrder = {
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: '11111111-1111-4111-8111-111111111111',
+    created_at: new Date().toISOString(),
+    total_amount: 2900, currency: 'usd', billing_reason: 'purchase',
+    checkout_id: '22222222-2222-4222-8222-222222222222',
+    customer_id: '33333333-3333-4333-8333-333333333333',
+    customer: { id: '33333333-3333-4333-8333-333333333333', email: 'polar@acme.com', name: 'Polar Jane', metadata: {} },
+    metadata: { ml_visitor_id: polarVid, ml_session_id: polarSid },
+  },
+};
+assert((await polar(polarOrder, false)).status === 401, 'Polar bad webhook signature rejected');
+assert((await polar(polarOrder)).status === 200, 'Polar webhook accepted');
+assert((await polar(polarOrder)).status === 200, 'Polar duplicate webhook is fine');
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    ...polarOrder.data, id: '44444444-4444-4444-8444-444444444444', billing_reason: 'subscription_cycle',
+    subscription_id: '55555555-5555-4555-8555-555555555555', metadata: {},
+  },
+});
+await polar({
+  type: 'refund.created', timestamp: new Date().toISOString(),
+  data: { id: '66666666-6666-4666-8666-666666666666', status: 'succeeded', amount: 2900, currency: 'usd', order_id: polarOrder.data.id, customer_id: polarOrder.data.customer_id },
+});
+const polarCust = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body;
+const polarPay = polarCust.find((c) => c.id === polarOrder.data.id);
+assert(polarPay && polarPay.visitor_id === polarVid && polarPay.source === 'X', 'Polar metadata payment credited to X');
+assert(polarCust.some((c) => c.id === '44444444-4444-4444-8444-444444444444' && c.renewal === 1 && c.visitor_id === polarVid), 'Polar renewal linked by customer id');
+
+const polarVid2 = crypto.randomUUID(), polarSid2 = crypto.randomUUID();
+const polarCheckoutId = '77777777-7777-4777-8777-777777777777';
+await event(polarSite.id, { t: 'pageview', u: 'https://polar-smoke.com/', r: 'https://www.reddit.com/', vid: polarVid2, sid: polarSid2 });
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: '88888888-8888-4888-8888-888888888888', created_at: new Date().toISOString(),
+    total_amount: 1900, currency: 'usd', billing_reason: 'purchase', checkout_id: polarCheckoutId,
+    customer: { id: '99999999-9999-4999-8999-999999999999', email: 'p2@example.com', name: 'P2', metadata: {} },
+    metadata: {},
+  },
+});
+let polarUnlinked = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === '88888888-8888-4888-8888-888888888888');
+assert(polarUnlinked && !polarUnlinked.visitor_id, 'Polar payment without metadata starts unlinked');
+await event(polarSite.id, { t: 'pageview', u: `https://polar-smoke.com/checkout/complete?checkout_id=${polarCheckoutId}`, r: 'https://buy.polar.sh/', vid: polarVid2, sid: polarSid2 });
+polarUnlinked = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === '88888888-8888-4888-8888-888888888888');
+assert(polarUnlinked.visitor_id === polarVid2 && polarUnlinked.source === 'Reddit' && polarUnlinked.matched_by === 'return_page', 'Polar checkout_id return page links it');
+
+const polarVid3 = crypto.randomUUID(), polarSid3 = crypto.randomUUID();
+const polarCheckoutId2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+await event(polarSite.id, { t: 'pageview', u: `https://polar-smoke.com/checkout/complete?checkout_id=${polarCheckoutId2}`, r: 'https://chatgpt.com/', vid: polarVid3, sid: polarSid3 });
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', created_at: new Date().toISOString(),
+    total_amount: 1500, currency: 'usd', checkout_id: polarCheckoutId2,
+    customer: { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', email: 'p3@example.com', name: 'P3', metadata: {} },
+    metadata: {},
+  },
+});
+const polarBefore = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+assert(polarBefore.visitor_id === polarVid3 && polarBefore.source === 'ChatGPT', 'Polar checkout_id seen before webhook still links');
+
+const polarVid4 = crypto.randomUUID(), polarSid4 = crypto.randomUUID();
+await event(polarSite.id, { t: 'pageview', u: 'https://polar-smoke.com/?ref=polar-article', r: '', vid: polarVid4, sid: polarSid4 });
+await event(polarSite.id, { t: 'outbound', u: 'https://polar-smoke.com/', n: 'https://buy.polar.sh/polar_cl_abc', vid: polarVid4, sid: polarSid4 });
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', created_at: new Date().toISOString(),
+    total_amount: 990, currency: 'usd',
+    customer: { id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', email: 'p4@example.com', name: 'P4', metadata: {} },
+    metadata: {},
+  },
+});
+const polarTiming = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === 'dddddddd-dddd-4ddd-8ddd-dddddddddddd');
+assert(polarTiming.visitor_id === polarVid4 && polarTiming.matched_by === 'timing' && polarTiming.ref === 'polar-article', 'Polar timing match credits the polar-article ref');
+
+// Polar checkout-link reference_id (the only custom metadata Polar stores from a static link)
+const polarVid5 = crypto.randomUUID(), polarSid5 = crypto.randomUUID();
+await event(polarSite.id, { t: 'pageview', u: 'https://polar-smoke.com/?ref=checkout-link', r: '', vid: polarVid5, sid: polarSid5 });
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', created_at: new Date().toISOString(),
+    total_amount: 500, currency: 'usd',
+    customer: { id: '12121212-1212-4121-8121-121212121212', email: 'p5@example.com', name: 'P5', metadata: {} },
+    metadata: { reference_id: polarVid5 },
+  },
+});
+const polarRef = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === 'ffffffff-ffff-4fff-8fff-ffffffffffff');
+assert(polarRef.visitor_id === polarVid5 && polarRef.matched_by === 'metadata', 'Polar reference_id on a checkout link is treated as the visitor');
+
+// Email fallback (identify) works for Polar the same as Dodo
+const polarVid6 = crypto.randomUUID(), polarSid6 = crypto.randomUUID();
+await event(polarSite.id, { t: 'pageview', u: 'https://polar-smoke.com/', r: 'https://www.linkedin.com/', vid: polarVid6, sid: polarSid6 });
+await event(polarSite.id, { t: 'identify', u: 'https://polar-smoke.com/', p: { email: 'polar-id@example.com', name: 'P6' }, vid: polarVid6, sid: polarSid6 });
+await polar({
+  type: 'order.paid', timestamp: new Date().toISOString(),
+  data: {
+    id: '13131313-1313-4131-8131-131313131313', created_at: new Date().toISOString(),
+    total_amount: 700, currency: 'usd',
+    customer: { id: '14141414-1414-4141-8141-141414141414', email: 'polar-id@example.com', name: 'P6', metadata: {} },
+    metadata: {},
+  },
+});
+const polarEmail = (await call(`/api/sites/${polarSite.id}/customers?period=today`)).body.find((c) => c.id === '13131313-1313-4131-8131-131313131313');
+assert(polarEmail.visitor_id === polarVid6 && polarEmail.matched_by === 'email' && polarEmail.source === 'LinkedIn', 'Polar email fallback after identify()');
+
+await call(`/api/sites/${polarSite.id}`, { method: 'DELETE' });
+
 for (const p of ['today', 'yesterday', '24h', '48h', '7d', '30d', '90d', '12m', 'all']) {
   const res = await call(`/api/sites/${site.id}/overview?period=${p}`);
   assert(res.status === 200 && res.body.series.length > 0, `period ${p} (${res.body.series.length} buckets, ${res.body.range.granularity})`);

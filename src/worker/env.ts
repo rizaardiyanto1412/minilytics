@@ -15,6 +15,7 @@ export interface Site {
   currency: string;
   api_key: string;
   dodo_webhook_secret: string | null;
+  polar_webhook_secret: string | null;
   created_at: number;
 }
 

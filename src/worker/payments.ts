@@ -23,6 +23,7 @@ interface PaymentInput {
   email?: string | null;
   name?: string | null;
   subscriptionId?: string | null;
+  checkoutId?: string | null;
   renewal?: boolean;
 }
 
@@ -37,10 +38,10 @@ export function creditedSessionSql() {
 /**
  * Work out which visitor paid and which visit gets the credit, trying the most reliable signal first:
  *  1. metadata   ml_visitor_id passed to the checkout
- *  2. return_page  the visitor landed on your return URL with ?payment_id=<this payment>
+ *  2. return_page  the visitor landed on your return URL with ?payment_id=<this payment> (or Polar ?checkout_id=)
  *  3. customer   the same customer paid before (renewals)
  *  4. email      the email matches a visitor you identify()'d
- *  5. timing     exactly one visitor clicked a Dodo checkout link (or a checkout goal) shortly before the payment
+ *  5. timing     exactly one visitor clicked a Dodo/Polar checkout link (or a checkout goal) shortly before the payment
  * Credit goes to the last non-direct visit, so "saw a tweet, came back directly 17 days later and paid"
  * is credited to the tweet.
  */
@@ -50,9 +51,10 @@ async function attribute(db: D1Database, site: Site, p: PaymentInput) {
   let renewal = !!p.renewal;
 
   if (!visitorId) {
+    const claimIds = [...new Set([p.id, p.subscriptionId, p.checkoutId].filter((x): x is string => !!x))];
     const claim = await db
-      .prepare('SELECT visitor_id FROM payment_claims WHERE site_id = ? AND payment_id IN (?, ?) ORDER BY ts LIMIT 1')
-      .bind(site.id, p.id, p.subscriptionId ?? p.id)
+      .prepare(`SELECT visitor_id FROM payment_claims WHERE site_id = ? AND payment_id IN (${claimIds.map(() => '?').join(',')}) ORDER BY ts LIMIT 1`)
+      .bind(site.id, ...claimIds)
       .first<{ visitor_id: string }>();
     if (claim) [visitorId, matchedBy] = [claim.visitor_id, 'return_page'];
   }
@@ -98,9 +100,9 @@ const TIMING_WINDOW_MS = 3 * 3_600_000;
 const MIN = 60_000;
 
 /**
- * Last resort when nothing identifies the buyer: look at who clicked a Dodo checkout link (or a checkout goal)
+ * Last resort when nothing identifies the buyer: look at who clicked a Dodo/Polar checkout link (or a checkout goal)
  * in the 3 hours before the payment. The strongest sign is coming back to the site right after paying
- * (Dodo redirects buyers to your return page); people who clicked Buy and gave up don't.
+ * (Dodo/Polar redirect buyers to your return page); people who clicked Buy and gave up don't.
  * Only ever picks a visitor when the evidence points to exactly one person.
  */
 async function matchByTiming(db: D1Database, site: Site, p: PaymentInput): Promise<{ visitorId: string | null; reason: string }> {
@@ -108,7 +110,8 @@ async function matchByTiming(db: D1Database, site: Site, p: PaymentInput): Promi
     .prepare(
       `SELECT e.visitor_id, MAX(e.ts) AS last_click FROM events e
        WHERE e.site_id = ? AND e.ts BETWEEN ? AND ?
-         AND ((e.type = 'outbound' AND e.name LIKE '%dodopayments.com%')
+         AND ((e.type = 'outbound' AND (e.name LIKE '%dodopayments.com%' OR e.name LIKE '%buy.polar.sh%'
+              OR e.name LIKE '%polar.sh/polar_c%' OR e.name LIKE '%polar.sh/polar_cl%'))
               OR (e.type = 'goal' AND (e.name LIKE '%checkout%' OR e.name LIKE '%buy%' OR e.name LIKE '%purchase%')))
          AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.site_id = e.site_id AND o.visitor_id = e.visitor_id
                          AND o.kind = 'payment' AND o.id != ? AND o.ts BETWEEN ? AND ?)
@@ -150,8 +153,8 @@ export async function recordPayment(db: D1Database, site: Site, p: PaymentInput)
   const stmts = [
     db
       .prepare(
-        `INSERT OR IGNORE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, renewal, matched_by, subscription_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name, renewal, matched_by, subscription_id, checkout_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         p.id,
@@ -169,6 +172,7 @@ export async function recordPayment(db: D1Database, site: Site, p: PaymentInput)
         renewal ? 1 : 0,
         matchedBy,
         p.subscriptionId ?? null,
+        p.checkoutId ?? null,
       ),
   ];
   // A payment tells us who an anonymous visitor really is.
@@ -189,7 +193,7 @@ export async function rematchPayments(db: D1Database, site: Site) {
   const rows = await db
     .prepare("SELECT * FROM payments WHERE site_id = ? AND kind = 'payment' AND visitor_id IS NULL ORDER BY ts LIMIT 500")
     .bind(site.id)
-    .all<{ id: string; ts: number; amount: number; currency: string; customer_id: string | null; email: string | null; name: string | null; provider: string; subscription_id: string | null }>();
+    .all<{ id: string; ts: number; amount: number; currency: string; customer_id: string | null; email: string | null; name: string | null; provider: string; subscription_id: string | null; checkout_id: string | null }>();
   let matched = 0;
   const details: { id: string; name: string | null; matched: boolean; reason: string | null }[] = [];
   for (const r of rows.results) {
@@ -204,6 +208,7 @@ export async function rematchPayments(db: D1Database, site: Site) {
       email: r.email,
       name: r.name,
       subscriptionId: r.subscription_id,
+      checkoutId: r.checkout_id,
     });
     details.push({ id: r.id, name: r.name, matched: !!a.visitorId, reason: a.reason });
     if (!a.visitorId) continue;
@@ -298,6 +303,110 @@ export async function handleDodoWebhook(c: Context<AppEnv>) {
       .run();
   }
   // Every other event type is acknowledged so Dodo doesn't retry it.
+  return c.json({ ok: true });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function asMeta(v: unknown): Record<string, unknown> {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/** Polar checkout links only persist `reference_id` (and UTM tags) from the URL; we treat a UUID reference_id as the visitor. */
+function polarVisitorFromMeta(meta: Record<string, unknown>): { visitorId: string | null; sessionId: string | null } {
+  const visitorId = pickMeta(meta, ['ml_visitor_id', 'visitor_id', 'minilytics_visitor_id']);
+  const sessionId = pickMeta(meta, ['ml_session_id', 'session_id', 'minilytics_session_id']);
+  const ref = str(meta.reference_id);
+  return { visitorId: visitorId ?? (ref && UUID_RE.test(ref) ? ref : null), sessionId };
+}
+
+async function recordPolarRefund(db: D1Database, site: Site, data: Record<string, any>, ts: number) {
+  const status = String(data.status ?? 'succeeded');
+  if (status !== 'succeeded') return;
+  const refundId = str(data.id);
+  const orderId = str(data.order_id);
+  if (!refundId) return;
+  const original = orderId
+    ? await db.prepare('SELECT * FROM payments WHERE id = ? AND site_id = ?').bind(orderId, site.id).first<{
+        visitor_id: string | null;
+        session_id: string | null;
+        currency: string;
+        amount: number;
+        customer_id: string | null;
+        email: string | null;
+        name: string | null;
+      }>()
+    : null;
+  const amount = Number(data.amount) || original?.amount || 0;
+  const customer = asMeta(data.customer);
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO payments (id, site_id, provider, ts, amount, kind, currency, visitor_id, session_id, customer_id, email, name)
+       VALUES (?, ?, 'polar', ?, ?, 'refund', ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      refundId,
+      site.id,
+      ts,
+      -Math.abs(amount),
+      String(data.currency ?? original?.currency ?? site.currency).toUpperCase(),
+      original?.visitor_id ?? null,
+      original?.session_id ?? null,
+      str(customer.id) ?? str(data.customer_id) ?? original?.customer_id ?? null,
+      str(customer.email)?.toLowerCase() ?? original?.email ?? null,
+      str(customer.name) ?? original?.name ?? null,
+    )
+    .run();
+}
+
+/** Polar webhook: POST /api/webhooks/polar/:siteId */
+export async function handlePolarWebhook(c: Context<AppEnv>) {
+  const site = await getSite(c.env.DB, c.req.param('siteId')!);
+  if (!site) return c.json({ error: 'unknown site' }, 404);
+  if (!site.polar_webhook_secret) return c.json({ error: 'webhook secret not configured for this site' }, 400);
+
+  const body = await c.req.text();
+  const ok = await verifyStandardWebhook(
+    site.polar_webhook_secret,
+    {
+      id: c.req.header('webhook-id') ?? null,
+      timestamp: c.req.header('webhook-timestamp') ?? null,
+      signature: c.req.header('webhook-signature') ?? null,
+    },
+    body,
+  );
+  if (!ok) return c.json({ error: 'invalid signature' }, 401);
+
+  const event = JSON.parse(body) as { type: string; timestamp?: string; data: Record<string, any> };
+  const data = event.data ?? {};
+  const customer = asMeta(data.customer);
+  const meta = { ...asMeta(customer.metadata), ...asMeta(data.metadata) };
+  const ts = Date.parse(data.created_at ?? event.timestamp ?? '') || Date.now();
+  const ids = polarVisitorFromMeta(meta);
+  const billingReason = str(data.billing_reason);
+
+  if (event.type === 'order.paid') {
+    const amount = Number(data.total_amount) || 0;
+    await recordPayment(c.env.DB, site, {
+      id: String(data.id),
+      provider: 'polar',
+      ts,
+      amount,
+      kind: 'payment',
+      currency: String(data.currency ?? site.currency),
+      visitorId: ids.visitorId,
+      sessionId: ids.sessionId,
+      customerId: str(customer.id) ?? str(data.customer_id),
+      email: str(customer.email)?.toLowerCase() ?? null,
+      name: str(customer.name) ?? str(customer.billing_name),
+      subscriptionId: str(data.subscription_id),
+      checkoutId: str(data.checkout_id),
+      renewal: billingReason === 'subscription_cycle' || billingReason === 'subscription_meter_cycle',
+    });
+  } else if (event.type === 'refund.created' || event.type === 'refund.updated') {
+    await recordPolarRefund(c.env.DB, site, data, ts);
+  }
+  // Every other event type is acknowledged so Polar doesn't retry it.
   return c.json({ ok: true });
 }
 
