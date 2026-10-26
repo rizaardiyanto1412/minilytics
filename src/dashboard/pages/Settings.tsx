@@ -271,6 +271,27 @@ const checkout = await polar.checkouts.create({
         </ol>
       </Section>
 
+      <Section
+        title="Revenue attribution with PaywallProject (WordPress)"
+        desc="PaywallProject sends every payment, renewal and refund here, and adds the tracking script for you."
+      >
+        <ol className="list-decimal space-y-2 pl-5 text-sm">
+          <li>
+            In WordPress, open <b>Paywall Project → Settings → Minilytics</b> and tick <b>Enable Minilytics</b>.
+          </li>
+          <li>
+            Fill in these values and save:
+            <Code>{`Minilytics address: ${origin}
+Website ID:         ${site.id}
+API key:            ${site.api_key}`}</Code>
+          </li>
+          <li>
+            If the tracking script from step 1 is already on the site, untick <b>Add the Minilytics tracking script</b> so
+            visits aren't counted twice.
+          </li>
+        </ol>
+      </Section>
+
       <Section title="Other payment providers / server-side API" desc="Send payments or goals from your backend using this site's API key.">
         <div className="mb-3 flex gap-2">
           <input className="input font-mono" readOnly value={site.api_key} />

@@ -169,6 +169,17 @@ each payment was matched, and **Try matching again** re-runs this for older paym
 Refunds are subtracted from revenue. Polar subscription renewals arrive as another `order.paid` (with
 `billing_reason: subscription_cycle`) and are marked as returning customers.
 
+## Revenue attribution with PaywallProject (WordPress)
+
+[PaywallProject](https://github.com/paywallproject/paywall-project) has a built-in Minilytics integration. In WordPress,
+open **Paywall Project → Settings → Minilytics**, tick **Enable Minilytics** and fill in your Minilytics address, the
+site's ID and its API key (all shown in the site's settings here). The plugin then:
+
+- adds the tracking script to every page (untick that if you already add it yourself), and `identify()`s logged-in readers;
+- saves each reader's visitor id on their WordPress account while they browse, so payments confirmed later by Stripe
+  webhooks are still credited to the right visitor;
+- sends every paid checkout, renewal and gift purchase, and every refund, to `/api/v1/payments` in the background.
+
 Other providers can use the generic API (the key is in site settings):
 
 ```bash
